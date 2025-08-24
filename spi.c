@@ -23,7 +23,7 @@ static void device_reset();
 static int fd = -1;
 
 static int spi_init(void) {
-	fd = open("/dev/spidev0.0", O_RDWR);
+	fd = open("/dev/spidev1.0", O_RDWR);
 	if (fd < 0) {
 		printf(" =====> device open error\n");
 		return -1;
@@ -105,9 +105,10 @@ static double device_read(void) {
 	int32_t code = (rx[1] << 16) | (rx[2] << 8) | rx[3];
 	if (code & 0x800000) code |= 0xFF000000;
 
+#if 0
 	printf(" Voltage = %.6f mV   Data %x%x%x\n",
 		device_code_to_mV(code, VREF, GAIN), rx[1], rx[2], rx[3]);
-
+#endif
 	return device_code_to_mV(code, VREF, GAIN);
 }
 
@@ -216,6 +217,36 @@ static double check_temp(void)
 	return temp;
 }
 
+int comp_d(const void *a, const void* b)
+{
+	double t1 = *(double*)a;
+	double t2 = *(double*)b;
+
+	if (t1 < t2) return -1;
+	else if (t1 > t2) return 1;
+	else return 0;
+}
+
+
+double get_ave_mv(void)
+{
+	double samples[10];
+	double sum = 0;
+
+	for (int i=0; i<10; i++) {
+		samples[i] = device_read();
+		usleep(1000);
+	}
+
+	qsort(samples, 10, sizeof(double), comp_d);
+
+	for (int i=2; i<8; i++) {
+		sum += samples[i];
+	}
+
+	return sum / 6.0;
+}
+
 int main(void)
 {
 	// check w1
@@ -242,16 +273,16 @@ int main(void)
 	device_write_reg(0x2, 0x7, 0x7); // ADCON GAIN 64
 
 	//dump_reg();
-	usleep(1000000);
+	usleep(3000000);
 
 	device_write_reg(0x1, 0x10, 0xff); // MUX AIN0/AIN1
-	mv1 = device_read();
+	mv1 = get_ave_mv();
 	device_write_reg(0x1, 0x32, 0xff); // MUX AIN2/AIN3
-	mv2 = device_read();
+	mv2 = get_ave_mv();
 	device_write_reg(0x1, 0x54, 0xff); // MUX AIN4/AIN5
-	mv3 = device_read();
+	mv3 = get_ave_mv();
 	device_write_reg(0x1, 0x76, 0xff); // MUX AIN6/AIN7
-	mv4 = device_read();
+	mv4 = get_ave_mv();
 
 	spi_deinit();
 
