@@ -7,15 +7,13 @@
 #include <linux/spi/spidev.h>
 
 
-#define SPI_SPEED  500000 // 500khz
-//#define SPI_SPEED  10000
+#define SPI_SPEED  10000 // 10khz
 #define CMD_RESET   0xFE  // reset
 #define CMD_SDATAC  0x0F  // Stop Read Data Continuous
-#define CMD_RREG    0x10  // | (reg_addr) ; 次バイトで n-1 を渡す
+#define CMD_SELFCAL 0xF0  // Self Calibration
+#define CMD_RREG    0x10  // | (reg_addr)
 #define CMD_WREG    0x50  // | (reg_addr)
 #define CMD_RDATA   0x01  // read data
-#define CMD_SYNC    0xFC  // sync
-#define CMD_WAKEUP  0xFF  // wakeup
 #define VREF	5  // 5V
 #define GAIN	64
 
@@ -23,7 +21,7 @@ static void device_reset();
 static int fd = -1;
 
 static int spi_init(void) {
-	fd = open("/dev/spidev1.0", O_RDWR);
+	fd = open("/dev/spidev0.0", O_RDWR);
 	if (fd < 0) {
 		printf(" =====> device open error\n");
 		return -1;
@@ -41,11 +39,8 @@ static int spi_init(void) {
 }
 
 static void spi_deinit(void) {
-	device_reset();
-	
 	close(fd);
 }
-
 
 static void spi_xfer(const uint8_t *tx, uint8_t *rx, size_t len) {
 	struct spi_ioc_transfer tr = {
@@ -54,37 +49,28 @@ static void spi_xfer(const uint8_t *tx, uint8_t *rx, size_t len) {
 		.len = len,
 		.speed_hz = SPI_SPEED,
 		.bits_per_word = 8,
-		.delay_usecs = 0,
 	};
 
 	if (ioctl(fd, SPI_IOC_MESSAGE(1), &tr) < 1)
 		printf(" error SPI transfer\n");
 }
 
-
 static void device_reset(void) {
 	uint8_t cmd = CMD_RESET;
 	spi_xfer(&cmd, NULL, 1);
-	usleep(50000);
+	usleep(5000);
 }
-
 
 static void device_stop_continuous(void) {
 	uint8_t cmd = CMD_SDATAC;
 	spi_xfer(&cmd, NULL, 1);
-	usleep(10);
-}
-
-static void device_sync(void) {
-	uint8_t cmd = CMD_SYNC;
-	spi_xfer(&cmd, NULL, 1);
 	usleep(1000);
 }
 
-static void device_wakeup(void) {
-	uint8_t cmd = CMD_WAKEUP;
-	spi_xfer(&cmd, NULL, 1);
-	usleep(1000);
+static void device_selfcal(void) {
+        uint8_t cmd = CMD_SELFCAL; //0xF0
+        spi_xfer(&cmd, NULL, 1);
+        usleep(1000);
 }
 
 static double device_code_to_mV(int32_t code, double vref, int gain) {
@@ -93,12 +79,8 @@ static double device_code_to_mV(int32_t code, double vref, int gain) {
 }
 
 static double device_read(void) {
-	device_sync();
-	device_wakeup();
-
 	uint8_t tx[4] = {CMD_RDATA, 0xFF, 0xFF, 0xFF};
 	uint8_t rx[4]  = {0};
-	//spi_xfer(&tx, NULL, 1);
 	spi_xfer(tx, rx, sizeof(rx));
 	usleep(1000);
 
@@ -115,15 +97,12 @@ static double device_read(void) {
 static uint8_t device_read_reg(uint8_t addr) {
 	uint8_t tx[3] = {CMD_RREG | addr, 0x00, 0xFF};
 	uint8_t rx[3] = {0};
-
 	spi_xfer(tx, rx, sizeof(tx));
 
 	return rx[2];
 }
 
 static void device_write_reg(uint8_t addr, uint8_t val, uint8_t mask) {
-	device_stop_continuous();
-
 	uint8_t reg = (device_read_reg(addr) & ~mask) | (val & mask);
 
 	uint8_t tx[3] = {CMD_WREG | addr, 0x00, reg };
@@ -164,7 +143,6 @@ double K_type_temp_to_mv(double T)
     return mv;
 }
 
-
 static double K_type_mv_to_temp(double mv)
 {
     /* NIST逆多項式 (0mV～54.886mV, 0℃～1372℃) */
@@ -188,7 +166,6 @@ static double K_type_mv_to_temp(double mv)
     }
     return T;
 }
-
 
 static double thermocouple_K(double T_ref, double V_tc)
 {
@@ -233,9 +210,10 @@ double get_ave_mv(void)
 	double samples[10];
 	double sum = 0;
 
+
 	for (int i=0; i<10; i++) {
-		samples[i] = device_read();
 		usleep(1000);
+		samples[i] = device_read();
 	}
 
 	qsort(samples, 10, sizeof(double), comp_d);
@@ -270,18 +248,25 @@ int main(void)
 
 	//dump_reg();
 
-	device_write_reg(0x2, 0x7, 0x7); // ADCON GAIN 64
+	//device_write_reg(0x0, 0x06, 0x06); // BUFFEN
+	device_write_reg(0x2, GAIN, 0xff); // ADCON GAIN 64
+	device_write_reg(0x3, 0x82, 0xff); // Rate setting 100SPS
 
+	device_selfcal();
+
+	usleep(10000);
 	//dump_reg();
-	usleep(3000000);
 
 	device_write_reg(0x1, 0x10, 0xff); // MUX AIN0/AIN1
 	mv1 = get_ave_mv();
-	device_write_reg(0x1, 0x32, 0xff); // MUX AIN2/AIN3
+
+	device_write_reg(0x1, 0x23, 0xff); // MUX AIN2/AIN3
 	mv2 = get_ave_mv();
-	device_write_reg(0x1, 0x54, 0xff); // MUX AIN4/AIN5
+
+	device_write_reg(0x1, 0x45, 0xff); // MUX AIN4/AIN5
 	mv3 = get_ave_mv();
-	device_write_reg(0x1, 0x76, 0xff); // MUX AIN6/AIN7
+
+	device_write_reg(0x1, 0x67, 0xff); // MUX AIN6/AIN7
 	mv4 = get_ave_mv();
 
 	spi_deinit();
