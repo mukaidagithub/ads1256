@@ -16,6 +16,7 @@
 #define CMD_RDATA   0x01  // read data
 #define VREF	5  // 5V
 #define GAIN	64
+#define GAIN_REG	7
 
 static void device_reset();
 static int fd = -1;
@@ -46,7 +47,7 @@ static void spi_xfer(const uint8_t *tx, uint8_t *rx, size_t len) {
 	struct spi_ioc_transfer tr = {
 		.tx_buf = (unsigned long)tx,
 		.rx_buf = (unsigned long)rx,
-		.len = len,
+		.len = len + 2,
 		.speed_hz = SPI_SPEED,
 		.bits_per_word = 8,
 	};
@@ -225,11 +226,37 @@ double get_ave_mv(void)
 	return sum / 6.0;
 }
 
+void init_config(int pin)
+{
+	device_reset();
+	device_stop_continuous();
+	device_write_reg(0x2, GAIN_REG, 0xff); // ADCON GAIN 64
+	device_write_reg(0x3, 0x82, 0xff); // Rate setting 100SPS
+
+	switch(pin) {
+	case 0:
+		device_write_reg(0x1, 0x10, 0xff); // MUX AIN0/AIN1
+		break;
+	case 1:
+		device_write_reg(0x1, 0x32, 0xff); // MUX AIN2/AIN3
+		break;
+	case 2:
+		device_write_reg(0x1, 0x54, 0xff); // MUX AIN4/AIN5
+		break;
+	case 3:
+		device_write_reg(0x1, 0x76, 0xff); // MUX AIN6/AIN7
+		break;
+	default:
+		break;
+	}
+	device_selfcal();
+}
+
 int main(void)
 {
 	// check w1
 	double temp = check_temp();
-	printf(" current tempperature %.3f\n", temp);
+	//printf(" current tempperature %.3f\n", temp);
 
 
 	// check adb1256
@@ -243,42 +270,33 @@ int main(void)
 
 	//dump_reg();
 
-	device_reset();
-	device_stop_continuous();
-
-	//dump_reg();
-
-	//device_write_reg(0x0, 0x06, 0x06); // BUFFEN
-	device_write_reg(0x2, GAIN, 0xff); // ADCON GAIN 64
-	device_write_reg(0x3, 0x82, 0xff); // Rate setting 100SPS
-
-	device_selfcal();
-
-	usleep(10000);
-	//dump_reg();
-
-	device_write_reg(0x1, 0x10, 0xff); // MUX AIN0/AIN1
+	init_config(0);
+	usleep(100000);
 	mv1 = get_ave_mv();
 
-	device_write_reg(0x1, 0x23, 0xff); // MUX AIN2/AIN3
+	init_config(1);
+	usleep(100000);
 	mv2 = get_ave_mv();
 
-	device_write_reg(0x1, 0x45, 0xff); // MUX AIN4/AIN5
+	init_config(2);
+	usleep(100000);
 	mv3 = get_ave_mv();
 
-	device_write_reg(0x1, 0x67, 0xff); // MUX AIN6/AIN7
+	init_config(3);
+	usleep(100000);
 	mv4 = get_ave_mv();
 
 	spi_deinit();
 
 	temp1 = thermocouple_K(temp, mv1);
-	printf("Measured Temp = %.2f °C\n", temp1);
+	//printf("Measured Temp = %.2f °C\n", temp1);
 	temp2 = thermocouple_K(temp, mv2);
-	printf("Measured Temp = %.2f °C\n", temp2);
+	//printf("Measured Temp = %.2f °C\n", temp2);
 	temp3 = thermocouple_K(temp, mv3);
-	printf("Measured Temp = %.2f °C\n", temp3);
+	//printf("Measured Temp = %.2f °C\n", temp3);
 	temp4 = thermocouple_K(temp, mv4);
-	printf("Measured Temp = %.2f °C\n", temp4);
+	//printf("Measured Temp = %.2f °C\n", temp4);
 
+	printf("%.3f,%.3f,%.3f,%.3f,%.3f\n", temp, temp1, temp2, temp3, temp4);
 	return 0;
 }
