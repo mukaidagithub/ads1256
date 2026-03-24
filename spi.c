@@ -1,415 +1,289 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
 #include <sys/ioctl.h>
 #include <linux/spi/spidev.h>
+#include "spi.h"
 
 
-#define SPI_SPEED  10000 // 10khz
-#define CMD_RESET   0xFE  // reset
-#define CMD_SDATAC  0x0F  // Stop Read Data Continuous
-#define CMD_SELFCAL 0xF0  // Self Calibration
-#define CMD_SYNC        0xFC  // Sync
-#define CMD_WAKEUP  0xFF  // Wakeup
-#define CMD_RREG        0x10  // | (reg_addr)
-#define CMD_WREG        0x50  // | (reg_addr)
-#define CMD_RDATA   0x01  // read data
-#define CMD_RDATAC  0x03  // read data continue
-#define VREF    5  // 5V
-#define GAIN    4
-#define GAIN_REG        2
+// Register info
+char *reg_name[] = {
+	"STATUS",
+	"MUX   ",
+	"ADCON ",
+	"DRATE ",
+	"IO    ",
+	"OFC0  ",
+	"OFC2  ",
+	"OFC3  ",
+	"FSC0  ",
+	"FSC1  ",
+	"FSC2  ",
+};
 
-static void init_config(int);
-static void device_reset();
-static int sensor_n = 1;
-static int fd1 = -1;
-static int fd2 = -1;
+// Reg
+#define REG_MUX	0x1
+#define REG_ADCON 0x2
+#define REG_DRATE 0x3
 
-static int spi_init(void) {
-        fd1 = open("/dev/spidev0.0", O_RDWR);
-        if (fd1 < 0) {
-                printf(" =====> device open error\n");
-                return -1;
-        }
 
-        fd2 = open("/dev/spidev0.1", O_RDWR);
-        if (fd2 < 0) {
-                printf(" =====> device open error\n");
-                return -1;
-        }
+// CMD info
+#define CMD_RESET	0xFE
+#define CMD_RDATA	0x01
+#define CMD_RDATAC	0x03
+#define CMD_RREG	0x10
+#define CMD_WREG	0x50
+#define CMD_STANDBY	0xFD
+#define CMD_WAKEUP	0xFF
+#define SPI_SPEED	1000000 // 1MHz
 
-        uint8_t mode = SPI_MODE_1;
-        uint8_t bits = 8;
-        uint32_t speed = SPI_SPEED;
+static int sensor_fd = 0;
+static int sensor_fd_1 = 0;
+static int sensor_fd_2 = 0; 
 
-        ioctl(fd1, SPI_IOC_WR_MODE, &mode);
-        ioctl(fd1, SPI_IOC_WR_BITS_PER_WORD, &bits);
-        ioctl(fd1, SPI_IOC_WR_MAX_SPEED_HZ, &speed);
-
-        ioctl(fd2, SPI_IOC_WR_MODE, &mode);
-        ioctl(fd2, SPI_IOC_WR_BITS_PER_WORD, &bits);
-        ioctl(fd2, SPI_IOC_WR_MAX_SPEED_HZ, &speed);
-
-        return 0;
-}
-
-static void spi_deinit(void) {
-        close(fd1);
-        close(fd2);
-}
-
-static void spi_xfer(const uint8_t *tx, uint8_t *rx, size_t len) {
-        struct spi_ioc_transfer tr = {
-                .tx_buf = (unsigned long)tx,
-                .rx_buf = (unsigned long)rx,
-                .len = len + 2,
-                .speed_hz = SPI_SPEED,
-                .bits_per_word = 8,
-        };
-
-        if (sensor_n == 0) {
-                if (ioctl(fd1, SPI_IOC_MESSAGE(1), &tr) < 1)
-                        printf(" error SPI transfer\n");
-        } else if (sensor_n == 1) {
-                if (ioctl(fd2, SPI_IOC_MESSAGE(1), &tr) < 1)
-                        printf(" error SPI transfer\n");
-        }
-}
-
-static void device_reset(void) {
-        uint8_t cmd = CMD_RESET;
-        spi_xfer(&cmd, NULL, 1);
-        usleep(5000);
-}
-
-static void device_read_continuous(void) {
-        uint8_t cmd = CMD_RDATAC;
-        spi_xfer(&cmd, NULL, 1);
-        usleep(1000);
-}
-static void device_stop_continuous(void) {
-        uint8_t cmd = CMD_SDATAC;
-        spi_xfer(&cmd, NULL, 1);
-        usleep(1000);
-}
-
-static void device_sync(void) {
-        uint8_t cmd = CMD_SYNC;
-        spi_xfer(&cmd, NULL, 1);
-        usleep(1000);
-}
-
-static void device_wakeup(void) {
-        uint8_t cmd = CMD_WAKEUP;
-        spi_xfer(&cmd, NULL, 1);
-        usleep(1000);
-}
-
-static void device_selfcal(void) {
-                uint8_t cmd = CMD_SELFCAL; //0xF0
-                spi_xfer(&cmd, NULL, 1);
-                usleep(1000);
-}
-
-static double device_code_to_mV(int32_t code, double vref, int gain) {
-        const double full_scale = 8388607.0;  // 2^23 - 1
-        return ((double)code / full_scale) * (vref * 1000.0 / gain);
-}
-
-static double device_read(void) {
-        uint8_t tx[4] = {CMD_RDATA, 0xFF, 0xFF, 0xFF};
-        uint8_t rx[4]  = {0};
-        spi_xfer(tx, rx, sizeof(rx));
-        usleep(1000);
-
-        int32_t code = (rx[1] << 16) | (rx[2] << 8) | rx[3];
-        if (code & 0x800000) code |= 0xFF000000;
-
-#if 0
-        printf(" Voltage = %.6f mV   Data %x%x%x\n",
-                device_code_to_mV(code, VREF, GAIN), rx[1], rx[2], rx[3]);
-#endif
-        return device_code_to_mV(code, VREF, GAIN);
-}
-
-static uint8_t device_read_reg(uint8_t addr) {
-        uint8_t tx[3] = {CMD_RREG | addr, 0x00, 0xFF};
-        uint8_t rx[3] = {0};
-        spi_xfer(tx, rx, sizeof(tx));
-
-        return rx[2];
-}
-
-static void device_write_reg(uint8_t addr, uint8_t val, uint8_t mask) {
-        uint8_t reg = (device_read_reg(addr) & ~mask) | (val & mask);
-
-        uint8_t tx[3] = {CMD_WREG | addr, 0x00, reg };
-        spi_xfer(tx, NULL, sizeof(tx));
-}
-
-static void dump_reg(void) {
-        char* regs[11] = {"STATUS", "MUX", "ADCON", "DRATE", "IO", "OFC0", "OFC1", "OFC2", "FSC0", "FSC1", "FSC2"};
-
-        for (int i=0; i<5; i++) {
-                printf(" REG[%s] = 0x%02X\n", regs[i], device_read_reg(i));
-        }
-        printf("--------------------------------------------------\n");
-}
-
-double K_type_temp_to_mv(double T)
+static void spi_xfer(const uint8_t *tx, uint8_t *rx, size_t len, uint8_t cs)
 {
-        /* NIST多項式 (0℃～1372℃) */
-        double c[] = {
-                0.000000000000E+00,
-                0.394501280250E-01,
-                0.236223735980E-04,
-                -0.328589067840E-06,
-                -0.499048287770E-08,
-                -0.675090591730E-10,
-                -0.574103274280E-12,
-                -0.310888728940E-14,
-                -0.104516093650E-16,
-                -0.198892668780E-19,
-                -0.163226974860E-22
-        };
-        double mv = 0.0;
-        double p = 1.0;
-        for (int i = 0; i <= 10; i++) {
-                mv += c[i] * p;
-                p *= T;
-        }
-        return mv;
+	struct spi_ioc_transfer tr = {0};
+
+	tr.tx_buf        = (unsigned long)tx;
+	tr.rx_buf        = (unsigned long)rx;
+	tr.len           = len; // cmd: 2byte + data: 1byte
+	tr.speed_hz      = SPI_SPEED;
+	tr.cs_change     = cs;
+	tr.bits_per_word = 8;
+
+	if (ioctl(sensor_fd, SPI_IOC_MESSAGE(1), &tr) < 1)
+		printf(" error SPI transfer\n");
 }
 
-static double K_type_mv_to_temp(double mv)
+
+/*
+ * READ REGISTER (CMD RREG)
+ */
+uint8_t read_reg(uint8_t addr)
 {
-        /* NIST逆多項式 (0mV～54.886mV, 0℃～1372℃) */
-        double d[] = {
-                0.0000000E+00,
-                2.508355E+01,
-                7.860106E-02,
-                -2.503131E-01,
-                8.315270E-02,
-                -1.228034E-02,
-                9.804036E-04,
-                -4.413030E-05,
-                1.057734E-06,
-                -1.052755E-08
-        };
-        double T = 0.0;
-        double p = 1.0;
-        for (int i = 0; i <= 9; i++) {
-                T += d[i] * p;
-                p *= mv;
-        }
-        return T;
+	uint8_t tx1[2] = { CMD_RREG | addr, 0x00 }; // read one data
+	uint8_t rx1[2] = { 0, 0};
+
+	// transfer
+	spi_xfer(tx1, rx1, sizeof(tx1), 1);
+
+	// wait
+	usleep(20);
+
+	uint8_t tx2[1] = {0};
+	uint8_t rx2[1] = {0};
+	// recieve
+	spi_xfer(tx2, rx2, sizeof(tx2), 0);
+
+	// wait
+	usleep(20);
+
+	return rx2[0];
 }
 
-static double thermocouple_K(double T_ref, double V_tc)
+/*
+ * WRITE REGISTER (CMD WREG)
+ */
+void write_reg(uint8_t addr, uint8_t val, uint8_t mask)
 {
-        double E_ref = K_type_temp_to_mv(T_ref);
-        double E_total = E_ref + V_tc;
-        double T_hot = K_type_mv_to_temp(E_total);
+	uint8_t rd    = read_reg(addr);
+	uint8_t reg   = (rd & ~mask) | (val & mask);
+	uint8_t tx[3] = { CMD_WREG | addr, 0x00, reg };
 
-        return T_hot;
+	spi_xfer(tx, NULL, sizeof(tx), 0);
+
+	// wait
+	usleep(20);
 }
 
-static double check_temp(void)
+void dump_reg(void)
 {
-        double temp = -0xFFFF;
-        int temp_;
-        FILE *fp = fopen("/sys/bus/w1/devices/28-0000005a1175/temperature", "r");
-        if (fp == NULL) {
-                printf(" error w1 open\n");
-                return -0xFFFF;
-        }
-        if (fscanf(fp, "%d", &temp_) == 1) {
-                temp = temp_ / 1000.0;
-        }
+	uint8_t tx1[3]  = { CMD_RREG | 0x00, 0xb };
+	uint8_t rx1[3]  = { 0, 0, 0 };
 
-        fclose(fp);
+	struct spi_ioc_transfer tr1 = {0};
+	tr1.tx_buf = (unsigned long)tx1;
+	tr1.rx_buf = (unsigned long)rx1;
+	tr1.len = 2;
+	tr1.cs_change = 1;
+	tr1.speed_hz = SPI_SPEED;
+	tr1.bits_per_word = 8;
 
-        return temp;
+	if (ioctl(sensor_fd, SPI_IOC_MESSAGE(1), &tr1) < 1)
+		printf(" error SPI transfer1\n");
+
+	// wait
+	usleep(20);
+
+	uint8_t tx2[11]; memset(tx2, 0x0, 11);
+	uint8_t rx2[11]; memset(rx2, 0xa, 11);
+
+        struct spi_ioc_transfer tr2 = {0};
+        tr2.tx_buf = (unsigned long)tx2;
+        tr2.rx_buf = (unsigned long)rx2;
+        tr2.len = 11;
+	tr2.cs_change = 0;
+        tr2.speed_hz = SPI_SPEED;
+        tr2.bits_per_word = 8;
+
+	if (ioctl(sensor_fd, SPI_IOC_MESSAGE(1), &tr2) < 1)
+		printf(" error SPI transfer2\n");
+
+	for (int i=0; i<11; i++) {
+		printf("%s[%x]\n", reg_name[i], rx2[i]);
+	}
+
+	// wait
+	usleep(20);
 }
 
-int comp_d(const void *a, const void* b)
+/*
+ * command
+ */
+int32_t device_rdata(void)
 {
-        double t1 = *(double*)a;
-        double t2 = *(double*)b;
+	uint8_t cmd = CMD_RDATA;
+	int32_t ret;
 
-        if (t1 < t2) return -1;
-        else if (t1 > t2) return 1;
-        else return 0;
+	spi_xfer(&cmd, NULL, 1, 1);
+
+	usleep(20);
+
+	uint8_t tx[3] = {0};
+	uint8_t rx[3] = {0};
+
+	// recieve
+	spi_xfer(tx, rx, sizeof(tx), 0);
+
+	ret = ((int32_t)rx[0] << 16) | ((int32_t)rx[1] << 8) | (int32_t)rx[2];
+
+	//printf(" read data %02x %02x %02x\n", rx[0], rx[1], rx[2]);
+	// wait
+	usleep(20);
+
+
+	return ret;
 }
 
-
-double get_ave_mv(int pin)
+static void device_reset(void)
 {
-#if 1
-        double samples[10];
-        double sum = 0;
+	uint8_t cmd = CMD_RESET;
 
-        for (int i=0; i<10; i++) {
-                init_config(pin);
-                usleep(10000);
-                samples[i] = device_read();
-        }
+	// transfer
+	spi_xfer(&cmd, NULL, 1, 0);
 
-        qsort(samples, 10, sizeof(double), comp_d);
-
-        for (int i=2; i<8; i++) {
-                sum += samples[i];
-        }
-
-        return sum / 6.0;
-#else
-        device_read(); // delete
-        usleep(50);
-        return device_read();
-#endif
+	// wait preparation of device
+	usleep(20000); // 20ms
 }
 
-void init_config(int pin)
+void device_standby(void)
 {
-        device_reset();
-        usleep(1000);
+	uint8_t cmd = CMD_STANDBY;
 
-        device_write_reg(0x2, GAIN_REG, 0xff); // ADCON GAIN 64
-        device_write_reg(0x3, 0x82, 0xff); // Rate setting 100SPS
-        //device_stop_continuous();
+	// transfer
+	spi_xfer(&cmd, NULL, 1, 0);
 
-        switch(pin) {
-        case 0:
-                device_write_reg(0x1, 0x01, 0xff); // MUX AIN0/AIN1
-                break;
-        case 1:
-                device_write_reg(0x1, 0x23, 0xff); // MUX AIN2/AIN3
-                break;
-        case 2:
-                device_write_reg(0x1, 0x45, 0xff); // MUX AIN4/AIN5
-                break;
-        case 3:
-                device_write_reg(0x1, 0x67, 0xff); // MUX AIN6/AIN7
-                break;
-        default:
-                break;
-        }
-        device_selfcal();
-        device_sync();
-        device_wakeup();
-        //device_read_continuous();
+	// wait preparation of device
+	usleep(1000); // 1ms
 }
 
-int main(int argc, char* argv[])
+void device_wakeup(void)
 {
-        if (access(argv[1], F_OK) == 0) {
-                printf(" already file exist %s\n", argv[1]);
-                return 1;
-        }
+	uint8_t cmd = CMD_WAKEUP;
 
-        // clock
-        struct timespec start, now;
-        long elapsed_sec;
-        clock_gettime(CLOCK_MONOTONIC, &start);
+	// transfer
+	spi_xfer(&cmd, NULL, 1, 0);
 
-
-        // check w1
-        double temp = check_temp();
-        //printf(" current tempperature %.3f\n", temp);
-
-
-        // check adb1256
-        double mv1, mv2, mv3, mv4;
-        double temp1[2], temp2[2], temp3[2], temp4[2];
-
-        if (spi_init() < 0) {
-                printf(" spi_init error\n");
-                return 1;
-        }
-
-        FILE *fp = fopen(argv[1], "w");
-        if (!fp) {
-                printf("fopen\n");
-                return 1;
-        }
-
-        unsigned int loop_count = 0;
-        unsigned int sleep_time = 0;
-        while (1) {
-                //printf(" SENSOR1\n");
-                sensor_n = 0;
-
-                mv1 = get_ave_mv(0);
-                usleep(50000);
-
-                mv2 = get_ave_mv(1);
-                usleep(50000);
-
-                mv3 = get_ave_mv(2);
-                usleep(50000);
-
-                mv4 = get_ave_mv(3);
-                usleep(50000);
-
-                temp1[0] = thermocouple_K(temp, mv1);
-                //printf("Measured Temp = %.2f °C\n", temp1[0]);
-                temp2[0] = thermocouple_K(temp, mv2);
-                //printf("Measured Temp = %.2f °C\n", temp2[0]);
-                temp3[0] = thermocouple_K(temp, mv3);
-                //printf("Measured Temp = %.2f °C\n", temp3[0]);
-                temp4[0] = thermocouple_K(temp, mv4);
-                //printf("Measured Temp = %.2f °C\n", temp4[0]);
-
-
-                //printf(" SENSOR2\n");
-                sensor_n = 1;
-
-                mv1 = get_ave_mv(0);
-                usleep(50000);
-
-                mv2 = get_ave_mv(1);
-                usleep(50000);
-
-                mv3 = get_ave_mv(2);
-                usleep(50000);
-
-                mv4 = get_ave_mv(3);
-                usleep(50000);
-
-                temp1[1] = thermocouple_K(temp, mv1);
-                //printf("Measured Temp = %.2f °C\n", temp1[1]);
-                temp2[1] = thermocouple_K(temp, mv2);
-                //printf("Measured Temp = %.2f °C\n", temp2[1]);
-                temp3[1] = thermocouple_K(temp, mv3);
-                //printf("Measured Temp = %.2f °C\n", temp3[1]);
-                temp4[1] = thermocouple_K(temp, mv4);
-                //printf("Measured Temp = %.2f °C\n", temp4[1]);
-
-
-                printf("%ld,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
-                        loop_count * 2, temp1[0], temp2[0], temp3[0], temp4[0],
-                         temp1[1], temp2[1], temp3[1], temp4[1]);
-                fprintf(fp, "%ld,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
-                        loop_count * 2, temp1[0], temp2[0], temp3[0], temp4[0],
-                         temp1[1], temp2[1], temp3[1], temp4[1]);
-
-                // sleep time
-                loop_count++;
-                clock_gettime(CLOCK_MONOTONIC, &now);
-                elapsed_sec = (now.tv_sec - start.tv_sec);
-                sleep_time = 120 * loop_count - elapsed_sec;
-                //printf(" sleep time:%ld\n", sleep_time);
-                fflush(fp);
-                fsync(fileno(fp));
-
-                //sleep(sleep_time);
-        }
-
-        fclose(fp);
-        spi_deinit();
-
-        return 0;
+	// wait preparation of device
+	usleep(1000); // 1ms
 }
+
+
+/*
+ * utils
+ */
+static void spi_setting(void)
+{
+//	write_reg(REG_ADCON, 0x7, 0x7); // Gain 64
+	write_reg(REG_ADCON, 0x5, 0x7); // Gain 32
+
+	// gain caribration
+	usleep(30000); // 30ms
+
+	write_reg(REG_DRATE, 0x42, 0xff); // 100 SPS
+}
+
+void  device_preparation(void)
+{
+	device_reset();
+	spi_setting();
+}
+
+void switch_sensor(uint8_t sensor)
+{
+	if (sensor == 0)
+		sensor_fd = sensor_fd_1;
+	else
+		sensor_fd = sensor_fd_2;
+}
+
+
+void switch_ch(uint8_t ch)
+{
+	switch (ch) {
+	case 0:
+		write_reg(REG_MUX, 0x01, 0xff); // AIN0 AIN1
+		break;
+	case 1:
+		write_reg(REG_MUX, 0x23, 0xff); // AIN2 AIN3
+		break;
+	case 2:
+		write_reg(REG_MUX, 0x45, 0xff); // AIN4 AIN5
+		break;
+	case 3:
+		write_reg(REG_MUX, 0x67, 0xff); // AIN6 AIN7
+		break;
+	default:
+		break;
+	}
+}
+
+uint32_t get_gain(void)
+{
+	uint8_t gain;
+
+	gain = read_reg(REG_ADCON) & 0x7;
+
+	return (gain == 0x7 ? 64 : (1 << gain));
+}
+
+void spi_init(void)
+{
+	uint8_t mode = SPI_MODE_1;   // recommend for ads1256
+	uint8_t bits = 8;            // recommend for ads1256
+	uint32_t speed = SPI_SPEED;  // 1MHz
+
+	ioctl(sensor_fd, SPI_IOC_WR_MODE, &mode);
+	ioctl(sensor_fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
+	ioctl(sensor_fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed);
+}
+
+void spi_open(void)
+{
+	sensor_fd_1 = open("/dev/spidev0.0", O_RDWR);
+	sensor_fd_2 = open("/dev/spidev0.1", O_RDWR);
+
+	sensor_fd = sensor_fd_1;
+}
+
+void spi_close(void)
+{
+	close(sensor_fd_1);
+	close(sensor_fd_2);
+}
+
