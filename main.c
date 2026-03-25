@@ -100,7 +100,7 @@ retry_get_temp:
 		get_temp_error_count = 0;
 
 		loop++;
-		if (loop > 182)
+		if (loop > 240) // 8h
 			break;
 
 		clock_gettime(CLOCK_MONOTONIC, &now);
@@ -122,7 +122,7 @@ retry_get_temp:
 
 	spi_close();
 
-	printf(" FIN 360 min.\n");
+	printf(" FIN 480 min.\n");
 
 	sleep(36000);
 
